@@ -84,18 +84,30 @@ func Register(c *gin.Context) {
 		return
 	}
 
+	// --- ADDED LOGIC: PREVENT MULTIPLE ADMINS ---
+	requestedRole := strings.ToLower(input.Role)
+	if requestedRole == "admin" {
+		var adminCount int64
+		config.DB.Model(&models.User{}).Where("role = ?", "admin").Count(&adminCount)
+		if adminCount > 0 {
+			c.JSON(http.StatusForbidden, gin.H{"error": "An administrator account already exists. Only one admin is allowed."})
+			return
+		}
+	}
+	// --------------------------------------------
+
 	// 4. Hash Password
 	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 
 	// 5. Create User (MATCHING YOUR STRUCT FIELDS)
 	user := models.User{
 		ID:        uuid.New(),
-		FirstName: input.FirstName, // Corrected
-		LastName:  input.LastName,  // Corrected
+		FirstName: input.FirstName,
+		LastName:  input.LastName,
 		Email:     input.Email,
 		Phone:     input.Phone,
 		Password:  string(hashedPassword),
-		Role:      strings.ToLower(input.Role),
+		Role:      requestedRole,
 		Status:    "active",
 	}
 
