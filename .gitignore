@@ -1,0 +1,27 @@
+
+
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# Dependency directories
+vendor/
+
+# Environment variables (Safety!)
+.env
+
+# User-specific stuff
+.idea/
+.vscode/
+*.swp
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Uploads (Optional: usually you don't want to push user selfies to Git)
+uploads/
