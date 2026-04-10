@@ -3,76 +3,108 @@ package auth
 import (
 	"api/config"
 	"api/internal/models"
-	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
-// 1. REGISTER (With Role Protection)
+// --- VALIDATION HELPERS ---
+
+func IsValidName(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	if len(trimmed) < 3 {
+		return false
+	}
+	// Ensure name is only letters and spaces (No Jay559!)
+	for _, r := range trimmed {
+		if !unicode.IsLetter(r) && !unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func IsValidKenyanPhone(phone string) bool {
+	// Pattern: 254 + 9 digits OR 07 + 8 digits OR 01 + 8 digits
+	pattern := `^(254\d{9}|07\d{8}|01\d{8})$`
+	match, _ := regexp.MatchString(pattern, phone)
+	return match
+}
+
+func IsValidEmail(email string) bool {
+	pattern := `^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`
+	match, _ := regexp.MatchString(pattern, email)
+	return match
+}
+
+// --- MAIN SIGNUP FUNCTION ---
+
 func Register(c *gin.Context) {
-	var input RegisterInput
+	var input struct {
+		FirstName string `json:"first_name" binding:"required"`
+		LastName  string `json:"last_name" binding:"required"`
+		Email     string `json:"email" binding:"required"`
+		Phone     string `json:"phone" binding:"required"`
+		Password  string `json:"password" binding:"required,min=6"`
+		Role      string `json:"role" binding:"required"`
+	}
+
 	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input data"})
 		return
 	}
 
-	// SECURITY: Hard-block anyone trying to register as Admin
-	if input.Role == "admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized role selection."})
+	// 1. Validate First and Last Names
+	if !IsValidName(input.FirstName) || !IsValidName(input.LastName) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Names must be letters only (no numbers) and at least 2 characters"})
 		return
 	}
 
-	hashedPassword, _ := HashPassword(input.Password)
+	// 2. Validate Email & Kenyan Phone
+	if !IsValidEmail(input.Email) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid email format"})
+		return
+	}
+	if !IsValidKenyanPhone(input.Phone) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid phone. Use 254..., 07..., or 01..."})
+		return
+	}
+
+	// 3. Prevent duplicate accounts
+	var existingUser models.User
+	if err := config.DB.Where("email = ? OR phone = ?", input.Email, input.Phone).First(&existingUser).Error; err == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "Email or phone number already registered"})
+		return
+	}
+
+	// 4. Hash Password
+	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+
+	// 5. Create User (MATCHING YOUR STRUCT FIELDS)
 	user := models.User{
-		FirstName: input.FirstName,
-		LastName:  input.LastName,
+		ID:        uuid.New(),
+		FirstName: input.FirstName, // Corrected
+		LastName:  input.LastName,  // Corrected
 		Email:     input.Email,
 		Phone:     input.Phone,
-		Password:  hashedPassword,
-		Role:      input.Role, // Will be 'nanny' or 'employer'
-		Status:    "inactive",
+		Password:  string(hashedPassword),
+		Role:      strings.ToLower(input.Role),
+		Status:    "active",
 	}
 
-	tx := config.DB.Begin()
-	if err := tx.Create(&user).Error; err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusConflict, gin.H{"error": "User with this Email/Phone already exists"})
+	if err := config.DB.Create(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not create user"})
 		return
 	}
 
-	// Create OTP
-	code := GenerateOTP()
-	otp := models.OTP{
-		UserID:    user.ID,
-		Code:      code,
-		Purpose:   "verification",
-		ExpiresAt: time.Now().Add(10 * time.Minute),
-	}
-	tx.Create(&otp)
-
-	// Audit Log the Registration
-	newVal, _ := json.Marshal(user)
-	audit := models.AuditLog{
-		UserID:    user.ID,
-		Action:    "USER_REGISTER",
-		Resource:  "Users",
-		NewValue:  string(newVal),
-		IPAddress: c.ClientIP(),
-	}
-	tx.Create(&audit)
-
-	tx.Commit()
-
-	// Instant Background Email
-	go SendOTPEmail(user.Email, code)
-
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "Registration successful. Verify your email to activate account.",
-		"role":    user.Role,
-	})
+	c.JSON(http.StatusCreated, gin.H{"message": "Account created successfully!"})
 }
 
 // 2. LOGIN (With Status & Role check)
